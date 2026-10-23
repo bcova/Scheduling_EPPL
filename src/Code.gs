@@ -13,8 +13,9 @@ var TAB = {
 };
 // The COPY of the programs sheet. Swap for the real one on the Settings tab later.
 var DEFAULT_PROGRAMS_SHEET_ID = '1PE4KjFfihsKoLKs8BckYSh302_1ml40ShsMXZMBd7Wo';
-var SHIFT_HEADERS = ['Date', 'Name', 'Start', 'End', 'Notes', 'Event ID (auto - leave alone)'];
-var EVENT_TAG = 'eppl-desk-shift';
+var SHIFT_HEADERS = ['Date', 'Name', 'Start', 'End', 'Notes', 'Calendar Event ID (auto)', 'Shift ID (auto)'];
+var STAFF_HEADERS = ['Name', 'Dept (AS / YS / Both)', 'Email', 'Weekly Desk Hour Cap (blank = none)', 'Also Known As (comma separated)', 'Role (Admin / AS Scheduler / YS Scheduler / blank)'];
+var EVENT_TAG = 'eppl-desk-shift'; // the tag's value is the desk ("AS" or "YS")
 
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('📅 Scheduler')
@@ -29,7 +30,14 @@ function onOpen() {
 
 /* ====================== small sheet helpers ====================== */
 
-function ss_() { return SpreadsheetApp.getActiveSpreadsheet(); }
+function ss_() {
+  var active = null;
+  try { active = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { /* web app context */ }
+  if (active) return active;
+  var id = PropertiesService.getScriptProperties().getProperty('SS_ID');
+  if (!id) throw new Error('Open the sheet and run 📅 Scheduler > 1. Set up / repair tabs once.');
+  return SpreadsheetApp.openById(id);
+}
 function ui_() { return SpreadsheetApp.getUi(); }
 
 function sheet_(name) {
@@ -71,6 +79,7 @@ function setSetting_(key, value) {
 
 function setupAll() {
   var ss = ss_();
+  PropertiesService.getScriptProperties().setProperty('SS_ID', ss.getId()); // lets the web app find this sheet
 
   // Settings
   var st = getOrCreate_(TAB.SETTINGS);
@@ -91,10 +100,12 @@ function setupAll() {
 
   // Staff
   var staff = getOrCreate_(TAB.STAFF);
-  if (staff.getLastRow() < 1) writeHeader_(staff, ['Name', 'Dept (AS / YS / Both)', 'Email', 'Weekly Desk Hour Cap (blank = none)', 'Also Known As (comma separated)']);
+  writeHeader_(staff, STAFF_HEADERS);
+  staff.getRange('F2:F200').setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(['Admin', 'AS Scheduler', 'YS Scheduler'], true).setAllowInvalid(true).build());
   staff.getRange('B2:B200').setDataValidation(
     SpreadsheetApp.newDataValidation().requireValueInList(['AS', 'YS', 'Both'], true).setAllowInvalid(true).build());
-  staff.setColumnWidth(1, 140); staff.setColumnWidth(2, 150); staff.setColumnWidth(3, 240); staff.setColumnWidth(4, 200); staff.setColumnWidth(5, 240);
+  staff.setColumnWidth(1, 140); staff.setColumnWidth(2, 150); staff.setColumnWidth(3, 240); staff.setColumnWidth(4, 200); staff.setColumnWidth(5, 240); staff.setColumnWidth(6, 200);
 
   // Hours
   var hrs = getOrCreate_(TAB.HOURS);
@@ -127,13 +138,13 @@ function setupAll() {
   // Shift tabs
   [TAB.AS, TAB.YS].forEach(function (name) {
     var sh = getOrCreate_(name);
-    if (sh.getLastRow() < 1) writeHeader_(sh, SHIFT_HEADERS);
+    writeHeader_(sh, SHIFT_HEADERS);
     sh.getRange('A2:A1000').setNumberFormat('m/d/yyyy');
     sh.getRange('C2:D1000').setNumberFormat('h:mm AM/PM');
     sh.getRange('B2:B1000').setDataValidation(
       SpreadsheetApp.newDataValidation().requireValueInRange(staff.getRange('A2:A200'), true).setAllowInvalid(true).build());
-    sh.setColumnWidth(2, 140); sh.setColumnWidth(5, 220); sh.setColumnWidth(6, 200);
-    sh.getRange('F:F').setFontColor('#999999');
+    sh.setColumnWidth(2, 140); sh.setColumnWidth(5, 220); sh.setColumnWidth(6, 200); sh.setColumnWidth(7, 120);
+    sh.getRange('F:G').setFontColor('#999999');
   });
 
   // Auto tabs
@@ -195,6 +206,22 @@ function importStaffNames_(quiet) {
   dataRows_(staff, 1).forEach(function (r) { existing[normName_(r[0])] = 1; });
   var add = names.filter(function (n) { return !existing[normName_(n)]; }).map(function (n) { return [n]; });
   if (add.length) staff.getRange(staff.getLastRow() + 1, 1, add.length, 1).setValues(add);
+
+  // People listed as Admin on the programs sheet's Lists tab become Admins here.
+  var adminNames = columnByHeader_(lists, 'Admin'), adminEmails = columnByHeader_(lists, 'Admin Email');
+  var last = staff.getLastRow();
+  if (last >= 2 && adminNames.length) {
+    var block = staff.getRange(2, 1, last - 1, 6).getValues();
+    adminNames.forEach(function (n, i) {
+      for (var r = 0; r < block.length; r++) {
+        if (normName_(block[r][0]) === normName_(n)) {
+          if (!block[r][5]) block[r][5] = 'Admin';
+          if (!block[r][2] && adminEmails[i]) block[r][2] = adminEmails[i];
+        }
+      }
+    });
+    staff.getRange(2, 1, block.length, 6).setValues(block);
+  }
   if (!quiet) ui_().alert('Added ' + add.length + ' staff names to the Staff tab. Now set each person\'s Dept.');
   return add.length;
 }
@@ -202,17 +229,29 @@ function importStaffNames_(quiet) {
 /* ====================== staff / settings readers ====================== */
 
 function readStaff_() {
-  var info = {}, map = {};
-  dataRows_(sheet_(TAB.STAFF), 5).forEach(function (r) {
+  var info = {}, map = {}, list = [];
+  dataRows_(sheet_(TAB.STAFF), 6).forEach(function (r) {
     var name = String(r[0]).trim();
     if (!name) return;
     var d = String(r[1]).trim().toUpperCase();
     info[name] = { dept: d === 'BOTH' ? 'Both' : (d === 'AS' || d === 'YS' ? d : ''), cap: parseFloat(r[3]) || 0 };
+    list.push({ name: name, dept: info[name].dept, cap: info[name].cap, email: String(r[2]).trim().toLowerCase(), role: roleOf_(r[5]) });
     map[normName_(name)] = name;
     String(r[4]).split(',').forEach(function (a) { if (a.trim()) map[normName_(a)] = name; });
   });
-  return { info: info, lookup: function (k) { return map[k] || null; } };
+  return { info: info, list: list, lookup: function (k) { return map[k] || null; } };
 }
+
+/** "AS Scheduler" -> "AS Scheduler"; "admin" -> "Admin"; anything else -> "Staff". */
+function roleOf_(text) {
+  var r = String(text || '').toLowerCase();
+  if (r.indexOf('admin') >= 0) return 'Admin';
+  if (r.indexOf('sched') >= 0 && /\bas\b/.test(r)) return 'AS Scheduler';
+  if (r.indexOf('sched') >= 0 && /\bys\b/.test(r)) return 'YS Scheduler';
+  return 'Staff';
+}
+
+function canEdit_(role, dept) { return role === 'Admin' || role === dept + ' Scheduler'; }
 
 function readHours_() {
   var h = {};
@@ -256,10 +295,11 @@ function readShifts_() {
   var out = [];
   [TAB.AS, TAB.YS].forEach(function (tab) {
     var dept = tab === TAB.AS ? 'AS' : 'YS';
-    dataRows_(sheet_(tab), 6).forEach(function (r, i) {
+    dataRows_(sheet_(tab), 7).forEach(function (r, i) {
       out.push({
         dept: dept, row: i + 2, name: String(r[1]).trim(), date: parseDateKey_(r[0]),
-        start: parseTime_(r[2]), end: parseTime_(r[3]), eventId: String(r[5]).trim()
+        start: parseTime_(r[2]), end: parseTime_(r[3]), notes: String(r[4]).trim(),
+        eventId: String(r[5]).trim(), id: String(r[6]).trim()
       });
     });
   });
@@ -269,12 +309,30 @@ function readShifts_() {
 /* ====================== 2. refresh programs ====================== */
 
 function refreshPrograms() {
+  var r;
+  try { r = refreshProgramsCore_(); } catch (e) { ui_().alert(e.message); return; }
+  var sk = r.skipped;
+  var un = Object.keys(r.unmatched).slice(0, 12).map(function (n) { return n + ' (' + r.unmatched[n] + ')'; }).join(', ');
+  ui_().alert('Programs refreshed ✅',
+    r.blocks + ' program-days that keep staff busy were loaded.\n' + r.closures + ' closure dates loaded.\n\n' +
+    'Skipped (on purpose):\n' +
+    ' • ' + sk.passive + ' passive (self-serve)\n' +
+    ' • ' + sk.nonBlocking + ' on the "Non Date Blocking" list\n' +
+    ' • ' + sk.allDay + ' all-day events\n' +
+    ' • ' + (sk.cancelled + sk.denied + sk.notApproved) + ' cancelled / denied / not approved\n' +
+    ' • ' + (sk.badDate + sk.noTimes) + ' with unreadable dates or times\n\n' +
+    (un ? 'Names in the programs sheet that are NOT on your Staff tab (they will not block anyone):\n' + un + '\n\nIf any are real staff, add them to the Staff tab (or as an "Also Known As").' : 'Every staff name matched. 👍'),
+    ui_().ButtonSet.OK);
+}
+
+/** Does the refresh and returns numbers. Throws plain-English errors. Used by the menu AND the web app. */
+function refreshProgramsCore_() {
   var src = progSS_();
   var tab = src.getSheetByName(getSetting_('Programs Tab'));
-  if (!tab) { ui_().alert('Could not find the tab "' + getSetting_('Programs Tab') + '" in the programs sheet.'); return; }
+  if (!tab) throw new Error('Could not find the tab "' + getSetting_('Programs Tab') + '" in the programs sheet.');
 
   var staff = readStaff_();
-  if (!Object.keys(staff.info).length) { ui_().alert('The Staff tab is empty. Run "Import staff names" first.'); return; }
+  if (!Object.keys(staff.info).length) throw new Error('The Staff tab is empty. Run "Import staff names" first.');
 
   var nonBlocking = {};
   var core = src.getSheetByName(getSetting_('Core Programs Tab'));
@@ -305,27 +363,16 @@ function refreshPrograms() {
   }
   setSetting_('Last Refresh', new Date().toLocaleString());
 
-  var sk = res.skipped;
-  var un = Object.keys(res.unmatched).slice(0, 12).map(function (n) { return n + ' (' + res.unmatched[n] + ')'; }).join(', ');
-  ui_().alert('Programs refreshed ✅',
-    res.blocks.length + ' program-days that keep staff busy were loaded.\n' + closureCount + ' closure dates loaded.\n\n' +
-    'Skipped (on purpose):\n' +
-    ' • ' + sk.passive + ' passive (self-serve)\n' +
-    ' • ' + sk.nonBlocking + ' on the "Non Date Blocking" list\n' +
-    ' • ' + sk.allDay + ' all-day events\n' +
-    ' • ' + (sk.cancelled + sk.denied + sk.notApproved) + ' cancelled / denied / not approved\n' +
-    ' • ' + (sk.badDate + sk.noTimes) + ' with unreadable dates or times\n\n' +
-    (un ? 'Names in the programs sheet that are NOT on your Staff tab (they will not block anyone):\n' + un + '\n\nIf any are real staff, add them to the Staff tab (or as an "Also Known As").' : 'Every staff name matched. 👍'),
-    ui_().ButtonSet.OK);
+  return { blocks: res.blocks.length, closures: closureCount, skipped: res.skipped, unmatched: res.unmatched };
 }
 
 /* ====================== 3. check schedule ====================== */
 
 function buildCtx_() {
   var staff = readStaff_();
-  var programs = dataRows_(sheet_(TAB.PROGRAMS), 7).filter(function (r) { return r[0]; }).map(function (r) {
+  var programs = dataRows_(sheet_(TAB.PROGRAMS), 8).filter(function (r) { return r[0]; }).map(function (r) {
     return {
-      date: parseDateKey_(r[0]), name: r[3], busyStart: parseTime_(r[5]), busyEnd: parseTime_(r[6]),
+      date: parseDateKey_(r[0]), dept: r[2], room: r[7], name: r[3], busyStart: parseTime_(r[5]), busyEnd: parseTime_(r[6]),
       staff: String(r[4]).split(';').map(function (x) { return x.trim(); }).filter(function (x) { return x; })
     };
   }).filter(function (p) { return p.date && p.busyStart != null && p.busyEnd != null; });
@@ -346,7 +393,7 @@ function checkSchedule() {
   // Colour the shift rows that have problems.
   [TAB.AS, TAB.YS].forEach(function (tab) {
     var sh = sheet_(tab);
-    sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), 6).setBackground(null);
+    sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), 7).setBackground(null);
   });
   var color = { Problem: '#f4c7c3', Warning: '#fce8b2' };
   var painted = {};
@@ -355,7 +402,7 @@ function checkSchedule() {
     var key = w.sheet + '|' + w.row;
     if (painted[key] === 'Problem') return;
     painted[key] = w.severity;
-    sheet_(w.sheet).getRange(w.row, 1, 1, 6).setBackground(color[w.severity]);
+    sheet_(w.sheet).getRange(w.row, 1, 1, 7).setBackground(color[w.severity]);
   });
 
   var wr = sheet_(TAB.WARNINGS);
@@ -391,44 +438,57 @@ function publishWeek() {
   if (!anyDay) { ui_().alert('I could not read that date.'); return; }
   var from = weekStart_(anyDay), to = addDays_(from, 6);
 
-  var shifts = readShifts_().filter(function (s) {
-    return s.name && s.date && s.start != null && s.end != null && s.end > s.start && s.date >= from && s.date <= to;
-  });
-
   var ok = ui_().alert('Publish?',
-    'Calendar: "' + cal.getName() + '"\nWeek: ' + from + ' to ' + to + '\nShifts to publish: ' + shifts.length +
+    'Calendar: "' + cal.getName() + '"\nWeek: ' + from + ' to ' + to + '\nBoth AS and YS desks.' +
     '\n\nThis will create/update desk-shift events and delete earlier desk-shift events from this week that are no longer on the sheet. ' +
     'Events you added by hand are never touched.\n\nContinue?', ui_().ButtonSet.YES_NO);
   if (ok !== ui_().Button.YES) return;
 
-  var created = 0, updated = 0, deleted = 0;
-  var seen = {};
-  var idUpdates = []; // {tab,row,id}
+  var r;
+  try { r = publishWeekCore_(from, ['AS', 'YS']); } catch (e) { ui_().alert(e.message); return; }
+  ui_().alert('Published ✅', r.created + ' created, ' + r.updated + ' updated, ' + r.deleted + ' removed.', ui_().ButtonSet.OK);
+}
 
+/**
+ * Publishes one Sunday-Saturday week for the given desks. Used by the menu AND the web app.
+ * Only ever touches events carrying this tool's tag for those desks.
+ */
+function publishWeekCore_(from, depts) {
+  var calId = getSetting_('Calendar ID');
+  if (!calId) throw new Error('No Calendar ID on the Settings tab yet.');
+  var cal = CalendarApp.getCalendarById(calId);
+  if (!cal) throw new Error('Could not open that calendar. Check the Calendar ID and that you can edit it.');
+  var to = addDays_(from, 6);
+
+  var shifts = readShifts_().filter(function (s) {
+    return depts.indexOf(s.dept) >= 0 && s.name && s.date && s.start != null && s.end != null && s.end > s.start && s.date >= from && s.date <= to;
+  });
+
+  var created = 0, updated = 0, deleted = 0, seen = {}, idUpdates = [];
   shifts.forEach(function (s) {
     var title = s.name + ' - ' + s.dept + ' Desk';
     var start = dateFromKey_(s.date, s.start), end = dateFromKey_(s.date, s.end);
     var ev = null;
     if (s.eventId && !seen[s.eventId]) {
       try { ev = cal.getEventById(s.eventId); } catch (e) { ev = null; }
-      if (ev && ev.getTag(EVENT_TAG) !== '1') ev = null; // never adopt someone else's event
+      if (ev && ev.getTag(EVENT_TAG) !== s.dept) ev = null; // never adopt someone else's event
     }
     if (ev) {
       ev.setTitle(title); ev.setTime(start, end); updated++;
     } else {
-      ev = cal.createEvent(title, start, end, { description: 'Desk shift from the EPPL Desk Scheduler. Edit it on the scheduling sheet, not here.' });
-      ev.setTag(EVENT_TAG, '1');
+      ev = cal.createEvent(title, start, end, { description: 'Desk shift from the EPPL Desk Scheduler. Edit it on the scheduling sheet or web app, not here.' });
+      ev.setTag(EVENT_TAG, s.dept);
       created++;
       idUpdates.push({ tab: s.dept === 'AS' ? TAB.AS : TAB.YS, row: s.row, id: ev.getId() });
     }
     seen[ev.getId()] = 1;
   });
 
-  // Remove desk-shift events (made by this tool) in this week that no longer have a row.
+  // Remove desk-shift events (made by this tool, for these desks) that no longer have a row.
   cal.getEvents(dateFromKey_(from, 0), dateFromKey_(addDays_(to, 1), 0)).forEach(function (ev) {
-    if (ev.getTag(EVENT_TAG) === '1' && !seen[ev.getId()]) { ev.deleteEvent(); deleted++; }
+    if (depts.indexOf(ev.getTag(EVENT_TAG)) >= 0 && !seen[ev.getId()]) { ev.deleteEvent(); deleted++; }
   });
 
   idUpdates.forEach(function (u) { sheet_(u.tab).getRange(u.row, 6).setValue(u.id); });
-  ui_().alert('Published ✅', created + ' created, ' + updated + ' updated, ' + deleted + ' removed.', ui_().ButtonSet.OK);
+  return { created: created, updated: updated, deleted: deleted, calendar: cal.getName() };
 }

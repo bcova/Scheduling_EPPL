@@ -7,4 +7,6 @@ programs sheet (read-only) and warns when someone is scheduled on desk while run
 - **Install:** see [INSTALL.md](INSTALL.md)
 - `src/Logic.gs`: pure scheduling logic (no Google APIs)
 - `src/Code.gs`: sheet/calendar I/O and the 📅 Scheduler menu
+- `src/WebApp.gs` + `src/Index.html`: the web interface (week grid, drag-and-drop, My Shifts)
+- `dev/`: local preview with fake data (`node dev/build-preview.js`) and browser tests (`node dev/ui.test.js`)
 - `tests/logic.test.js`: run with `node tests/logic.test.js`

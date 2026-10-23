@@ -104,4 +104,25 @@ assert(!w.some(x => /Katie/.test(x.message) && /cap/.test(x.message)), 'no false
 const clean = runChecks_({ ...ctx, shifts: [sh('YS', 2, 'Katie', '2026-05-05', '9:00 AM', '9:00 PM'), sh('AS', 2, 'Thomas', '2026-05-06', '9:00 AM', '9:00 PM')], timeOff: [], staff: { Katie: { dept: 'YS', cap: 0 }, Thomas: { dept: 'AS', cap: 0 } } });
 assert.deepStrictEqual(clean.filter(x => x.severity === 'Problem'), [], JSON.stringify(clean));
 
+// ---- web app helpers ----
+const v = validateShiftInput_({ dept: 'ys', date: '5/4/2026', name: 'mary carol', start: 540, end: '12:00 PM', notes: 'x' }, lookup);
+assert.deepStrictEqual(v, { dept: 'YS', date: '2026-05-04', name: 'Mary-Carol', start: 540, end: 720, notes: 'x' });
+assert(validateShiftInput_({ dept: 'ys', date: '5/4/2026', name: 'Nobody', start: 540, end: 600 }, lookup).error);
+assert(validateShiftInput_({ dept: 'ys', date: '5/4/2026', name: 'Katie', start: 600, end: 540 }, lookup).error);
+assert(validateShiftInput_({ dept: 'xx', date: '5/4/2026', name: 'Katie', start: 540, end: 600 }, lookup).error);
+
+const wk = buildWeekPayload_({
+  shifts: [{ id: 'a1', dept: 'YS', row: 2, name: 'Katie', date: '2026-05-01', start: 540, end: 720, notes: '' },
+           { id: 'zz', dept: 'YS', row: 3, name: 'Katie', date: '2026-06-01', start: 540, end: 720 }],
+  programs: res.blocks, timeOff: [], closures: { '2026-05-02': 1 }, staff: ctx.staff, lookup, hours, coverage: cov
+}, '2026-05-01');
+assert.strictEqual(wk.start, '2026-04-26');
+assert.strictEqual(wk.days.length, 7);
+assert.strictEqual(wk.shifts.length, 1);                       // June shift is outside this week
+assert.deepStrictEqual(wk.closures, ['2026-05-02']);
+const sensory = wk.warnings.find(x => /Sensory Hour/.test(x.message));
+assert.strictEqual(sensory.shiftId, 'a1');                      // warning points at the shift
+assert(wk.warnings.some(x => x.from != null && x.to != null));  // coverage bands carry minutes
+assert.strictEqual(Object.keys(wk.shifts[0]).includes('canon'), false); // checker's scratch fields not leaked
+
 console.log('All tests passed (' + w.length + ' warnings produced in the messy scenario).');

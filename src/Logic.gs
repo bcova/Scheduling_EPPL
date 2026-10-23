@@ -232,7 +232,7 @@ function runChecks_(ctx) {
   function add(severity, s, message, extra) {
     var w = {
       severity: severity, dept: s.dept || '', date: s.date || '', person: s.person || s.name || '',
-      message: message, sheet: s.dept ? s.dept + ' Shifts' : '', row: s.row || 0
+      message: message, sheet: s.dept ? s.dept + ' Shifts' : '', row: s.row || 0, shiftId: s.id || ''
     };
     if (extra) for (var k in extra) w[k] = extra[k];
     W.push(w);
@@ -317,7 +317,7 @@ function runChecks_(ctx) {
   ['AS', 'YS'].forEach(function (dept) {
     var ds = valid.filter(function (s) { return s.dept === dept; });
     if (!ds.length) {
-      W.push({ severity: 'Note', dept: dept, date: '', person: '', message: 'No ' + dept + ' shifts entered yet, so coverage was not checked', sheet: '', row: 0 });
+      W.push({ severity: 'Note', dept: dept, date: '', person: '', message: 'No ' + dept + ' shifts entered yet, so coverage was not checked', sheet: '', row: 0, shiftId: '' });
       return;
     }
     var dates = ds.map(function (s) { return s.date; }).sort();
@@ -334,7 +334,7 @@ function runChecks_(ctx) {
       var flush = function () {
         if (run) {
           W.push({
-            severity: 'Problem', dept: dept, date: d, person: '', sheet: '', row: 0,
+            severity: 'Problem', dept: dept, date: d, person: '', sheet: '', row: 0, shiftId: '', from: run.start, to: run.end,
             message: 'Only ' + run.n + ' on ' + dept + ' desk (need ' + need + ') ' + fmtTime_(run.start) + '-' + fmtTime_(run.end)
           });
         }
@@ -357,4 +357,55 @@ function runChecks_(ctx) {
     return (order[a.severity] - order[b.severity]) || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
   });
   return W;
+}
+
+/* ---------- web app helpers (pure, shared by the real server and the preview) ---------- */
+
+/**
+ * Checks a shift typed into the web app. Returns {error} or a clean shift.
+ * input: {dept, date, name, start, end, notes}  (start/end = minutes or "9:00 AM" text)
+ */
+function validateShiftInput_(input, lookup) {
+  var dept = String(input.dept || '').toUpperCase();
+  if (dept !== 'AS' && dept !== 'YS') return { error: 'Pick AS or YS.' };
+  var date = parseDateKey_(input.date);
+  if (!date) return { error: 'That date is not readable.' };
+  var canon = lookup(normName_(input.name));
+  if (!canon) return { error: 'Pick a person from the Staff list.' };
+  var st = typeof input.start === 'number' ? input.start : parseTime_(input.start);
+  var en = typeof input.end === 'number' ? input.end : parseTime_(input.end);
+  if (st == null || en == null) return { error: 'Start and end times are required.' };
+  if (en <= st) return { error: 'End time must be after start time.' };
+  return { dept: dept, date: date, name: canon, start: st, end: en, notes: String(input.notes || '').slice(0, 200) };
+}
+
+/**
+ * Everything the week screen needs, in one plain object.
+ * db: {shifts, programs, timeOff, closures, staff, lookup, hours, coverage}
+ */
+function buildWeekPayload_(db, anyDayKey) {
+  var start = weekStart_(anyDayKey), end = addDays_(start, 6), days = [];
+  for (var i = 0; i < 7; i++) days.push(addDays_(start, i));
+  var inWeek = function (d) { return d && d >= start && d <= end; };
+
+  var shifts = db.shifts.filter(function (s) { return inWeek(s.date); });
+  var programs = db.programs.filter(function (p) { return inWeek(p.date); });
+  var timeOff = db.timeOff.filter(function (t) { return t.end >= start && t.start <= end; });
+  var warnings = runChecks_({
+    shifts: shifts.map(function (s) { return Object.assign({}, s); }),
+    programs: programs, staff: db.staff, lookup: db.lookup, timeOff: timeOff,
+    hours: db.hours, coverage: db.coverage, closures: db.closures
+  });
+  return {
+    start: start, end: end, days: days,
+    shifts: shifts.map(function (s) {
+      return { id: s.id, dept: s.dept, date: s.date, name: s.name, start: s.start, end: s.end, notes: s.notes || '' };
+    }),
+    programs: programs.map(function (p) {
+      return { date: p.date, dept: p.dept || '', name: p.name, busyStart: p.busyStart, busyEnd: p.busyEnd, staff: p.staff, room: p.room || '' };
+    }),
+    timeOff: timeOff,
+    closures: days.filter(function (d) { return db.closures[d]; }),
+    warnings: warnings
+  };
 }
